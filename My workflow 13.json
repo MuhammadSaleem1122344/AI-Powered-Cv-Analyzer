@@ -1,0 +1,167 @@
+{
+  "name": "My workflow 13",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "aa04d6fa-b1ae-4c3f-861b-db4fee8e709a",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -1568,
+        -720
+      ],
+      "id": "cf3131ec-019f-4a37-8411-2dddd18c062f",
+      "name": "Webhook",
+      "webhookId": "aa04d6fa-b1ae-4c3f-861b-db4fee8e709a"
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "cv",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        -1200,
+        -736
+      ],
+      "id": "9647dc27-f6b7-4dd9-9216-e6602e27de27",
+      "name": "Extract from File"
+    },
+    {
+      "parameters": {
+        "resource": "document",
+        "modelId": {
+          "__rl": true,
+          "value": "models/gemma-4-26b-a4b-it",
+          "mode": "list",
+          "cachedResultName": "models/gemma-4-26b-a4b-it"
+        },
+        "text": "=What's in this document? {{ $json.text }}",
+        "simplify": false,
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.googleGemini",
+      "typeVersion": 1.2,
+      "position": [
+        -864,
+        -768
+      ],
+      "id": "34bb1c35-f830-4351-93cf-210f41016bcb",
+      "name": "Analyze document",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "hlyQaBn3opLRUoWp",
+          "name": "Google Gemini(PaLM) Api account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== 1. INPUTS =====\nconst first = $input.first().json;\nconst parts = first?.candidates?.[0]?.content?.parts || [];\nconst aiText = (\n  parts.filter(p => p.text && !p.thought).map(p => p.text).join('\\n') ||\n  first.text || ''\n).trim();\n\nlet cvText = '', pages = 1, jd = '';\ntry { const e = $('Extract from File').first().json; cvText = String(e.text || ''); pages = e.numpages || 1; } catch (e) {}\ntry { jd = $('Webhook').first().json.body.jobDescription || ''; } catch (e) {}\n\n// ===== 2. SECTION PARSER (plain headings + markdown) =====\nconst LABELS = {\n  objective: 'objective|career objective',\n  summary: 'summary|professional summary|profile|professional profile|about me',\n  experience: 'experience|work experience|professional experience|employment history|employment|work history|internships?',\n  education: 'education|academic background|qualifications',\n  skills: 'skills|technical skills|key skills|core skills|technologies',\n  projects: 'projects?|personal projects',\n  certifications: 'certifications?|certificates|courses|training',\n  name: 'name|full name',\n  role: 'role|job title|title',\n  stop: 'languages|interests|hobbies|references|awards'\n};\nconst HEADS = Object.entries(LABELS).map(([k, v]) => [k, new RegExp('^(?:' + v + ')(?:\\\\s*[:\\\\-–—]\\\\s*|\\\\s*$)(.*)$', 'i')]);\nconst clean = l => l.replace(/[*_`#>|]/g, '').replace(/^\\s*(?:[-•▪●]|\\d+[.)])\\s+/, '').trim();\n\nfunction parse(text) {\n  const out = {}; let cur = null;\n  for (const raw of String(text || '').split(/\\r?\\n/)) {\n    const line = clean(raw);\n    if (!line) continue;\n    let hit = null;\n    for (const [k, re] of HEADS) { const m = line.match(re); if (m) { hit = [k, m[1].trim()]; break; } }\n    if (hit) { cur = hit[0]; out[cur] = out[cur] || []; if (hit[1]) out[cur].push(hit[1]); }\n    else if (cur) out[cur].push(line);\n  }\n  return out;\n}\n\n// ===== 3. AI + CV TEXT =====\nconst ai = parse(aiText), cv = parse(cvText);\n\n// If Gemini returned JSON, it overrides the markdown parse\ntry {\n  const m = aiText.match(/\\{[\\s\\S]*\\}/);\n  const aj = m ? JSON.parse(m[0]) : null;\n  if (aj) for (const k of ['name','role','objective','summary','experience','education','skills','projects','certifications']) {\n    const hit = Object.entries(aj).find(([x]) => x.toLowerCase() === k);\n    if (hit && hit[1] != null) ai[k] = [].concat(hit[1])\n      .map(x => typeof x === 'string' ? x : Object.values(x).join(' — ')).filter(Boolean);\n  }\n} catch (e) {}\n\n// CV text first (exactly what the user wrote), Gemini as fallback\nconst get = k => (cv[k] && cv[k].length ? cv[k] : ai[k]) || [];\nconst cvLines = cvText.split(/\\r?\\n/).map(l => l.trim()).filter(Boolean);\nconst name = (ai.name && ai.name.join(' ')) || (cv.name && cv.name.join(' ')) || cvLines[0] || '';\nconst role = (ai.role && ai.role.join(' ')) || (cv.role && cv.role.join(' ')) || '';\n\nconst objective = get('objective').join(' ');\nconst summary = get('summary').join(' ');\nconst experience = get('experience');\nconst education = get('education');\nconst projects = get('projects');\nconst certifications = get('certifications');\nconst skillsList = [...new Set(get('skills').join(', ').split(/[,;|•]/).map(s => s.trim()).filter(s => s && s.length < 40))];\n\n// ===== 4. ANALYSIS (score, skills, contact) =====\nconst t = cvText.replace(/\\s+/g, ' ').trim();\nconst low = (t + ' ' + skillsList.join(' ')).toLowerCase();\nconst has = k => new RegExp('(^|[^a-z0-9])' + k.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&') + '($|[^a-z0-9])').test(low);\n\nconst SK = {\n  'Frontend': ['html','css','javascript','typescript','react','vue','angular','tailwind','next.js','bootstrap','sass','redux','framer motion'],\n  'Backend': ['node','node.js','express','python','django','flask','java','spring','php','laravel','c#','.net','sql','mongodb','postgresql','mysql','supabase','rest','graphql','api'],\n  'Cloud and DevOps': ['docker','kubernetes','aws','azure','gcp','git','github','ci/cd','linux','n8n','jenkins','terraform'],\n  'Data and AI': ['machine learning','ai','nlp','tensorflow','pytorch','pandas','numpy','power bi','excel','tableau','llm','openai'],\n  'Working style': ['leadership','communication','teamwork','problem solving','agile','scrum','management']\n};\nconst skills = Object.entries(SK).map(([category, list]) => ({ category, items: list.filter(has) })).filter(g => g.items.length);\nconst skillCount = skills.reduce((n, g) => n + g.items.length, 0);\nconst words = (t.toLowerCase().match(/[a-z0-9+#.]{2,}/g) || []).length;\n\nconst contact = {\n  email: /[\\w.+-]+@[\\w-]+\\.[\\w.]+/.test(t),\n  phone: /\\+?\\d[\\d\\s-]{8,}\\d/.test(t),\n  linkedin: /linkedin/.test(low),\n  github: /github/.test(low)\n};\n\nconst SEC = {\n  summary: /\\b(summary|profile|objective|about me)\\b/, experience: /\\b(experience|employment|work history|internship)\\b/,\n  education: /\\b(education|university|college|bachelor|master|degree|b\\.?sc|m\\.?sc)\\b/, skills: /\\b(skills|technologies|technical|competenc)/,\n  projects: /\\bprojects?\\b/, certifications: /\\b(certif|courses?|training)/\n};\nconst W = { contact: 15, summary: 10, experience: 20, education: 15, skills: 15, projects: 10, certifications: 5 };\nconst found = { summary: summary || objective, experience: experience.length, education: education.length, skills: skillsList.length, projects: projects.length, certifications: certifications.length };\nconst sections = {}; let score = 0;\nfor (const k in W) {\n  sections[k] = k === 'contact' ? (contact.email || contact.phone) : !!found[k] || SEC[k].test(low);\n  if (sections[k]) score += W[k];\n}\nscore += (words >= 250 && words <= 1000) ? 10 : (words >= 120 && words <= 1500) ? 5 : 0;\nscore = Math.min(100, score);\n\n// ===== 5. JOB MATCH =====\nconst STOP = new Set('the and for you our will are have has your that this from able work working team years year experience strong good role job skills knowledge ability required preferred including using related across within must should plus etc such other more their they who what also can with not but all any new use used how why where when about into than then its was were been being does did'.split(' '));\nlet matchScore = null, missingKeywords = [];\nif (jd.trim().length > 20) {\n  const freq = {};\n  (jd.toLowerCase().match(/[a-z][a-z0-9+#.]{2,}/g) || []).filter(w => !STOP.has(w)).forEach(w => freq[w] = (freq[w] || 0) + 1);\n  const kws = Object.entries(freq).sort((a, b) => b[1] - a[1]).slice(0, 25).map(e => e[0]);\n  const hit = kws.filter(has);\n  matchScore = kws.length ? Math.round(hit.length / kws.length * 100) : null;\n  missingKeywords = kws.filter(k => !hit.includes(k)).slice(0, 12);\n}\n\n// ===== 6. SUGGESTIONS =====\nconst S = [];\nif (!t) S.push('No readable text found. Upload a text-based PDF, not a scan.');\nif (!contact.email) S.push('Add a professional email address at the top.');\nif (!contact.phone) S.push('Add a phone number so recruiters can call you.');\nif (!contact.linkedin && !contact.github) S.push('Link your LinkedIn or GitHub profile.');\n[['summary','Add a 2 to 3 line professional summary.'],['experience','Add an experience section with roles, dates and results.'],['education','Add your education.'],['skills','Add a dedicated skills section.'],['projects','Add 2 or 3 projects with what you built and the outcome.']]\n  .forEach(([k, m]) => { if (!sections[k]) S.push(m); });\nif ((t.match(/\\d+\\s?%|\\$\\s?\\d+|\\b\\d{2,}\\+?\\b/g) || []).length < 3) S.push('Quantify your results, for example \"cut load time by 40%\".');\nif (skillCount < 6) S.push('List more relevant tools and technologies.');\nif (t && words < 250) S.push('Your CV is short. Expand on experience and projects.');\nif (words > 1000) S.push('Your CV is long. Trim it to one or two pages.');\nif (matchScore !== null && missingKeywords.length) S.push('Work these job keywords into your CV where true: ' + missingKeywords.slice(0, 6).join(', ') + '.');\n\n// ===== 7. OUTPUT =====\nreturn [{ json: {\n  // fields used by the CV Lens page\n  score,\n  verdict: score >= 80 ? 'Strong CV' : score >= 60 ? 'Good, with room to improve' : 'Needs work',\n  matchScore, skills, skillCount, sections, contact, missingKeywords,\n  suggestions: S,\n  stats: { words, pages, characters: t.length },\n  preview: t.slice(0, 240),\n  analyzedBy: 'n8n',\n  // everything the user wrote in the CV\n  name, role, objective, summary, experience, education, projects, certifications,\n  skillsSection: skillsList.join(', '),\n  aiSummary: aiText\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -528,
+        -784
+      ],
+      "id": "bd0d08d0-fef4-4699-9b1f-b6a295de0733",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "sendTo": "parachasaleem316@gmail.com",
+        "subject": "AI Document Analyze",
+        "emailType": "text",
+        "message": "=Name: {{ $json.name || 'Not found' }}\nRole: {{ $json.role || 'Not found' }}\n\nCV Score: {{ $json.score }}/100 ({{ $json.verdict }})\nJob Match: {{ $json.matchScore ?? 'No job description given' }}\nWords: {{ $json.stats.words }} | Pages: {{ $json.stats.pages }}\n\n----- OBJECTIVE -----\n{{ $json.objective || 'Not found' }}\n\n----- SUMMARY -----\n{{ $json.summary || 'Not found' }}\n\n----- EXPERIENCE -----\n{{ $json.experience.join('\\n') || 'Not found' }}\n\n----- EDUCATION -----\n{{ $json.education.join('\\n') || 'Not found' }}\n\n----- SKILLS ({{ $json.skillCount }} detected) -----\n{{ $json.skills.map(g => g.category + ': ' + g.items.join(', ')).join('\\n') || 'Not found' }}\n\n----- PROJECTS -----\n{{ $json.projects.join('\\n') || 'Not found' }}\n\n----- CERTIFICATIONS -----\n{{ $json.certifications.join('\\n') || 'Not found' }}\n\n----- CONTACT FOUND -----\nEmail: {{ $json.contact.email ? 'Yes' : 'No' }}\nPhone: {{ $json.contact.phone ? 'Yes' : 'No' }}\nLinkedIn: {{ $json.contact.linkedin ? 'Yes' : 'No' }}\nGitHub: {{ $json.contact.github ? 'Yes' : 'No' }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        -160,
+        -848
+      ],
+      "id": "71da75a7-7e55-4743-a072-03a02822fa72",
+      "name": "Send a message",
+      "webhookId": "9d58e50d-31af-4614-b85a-b61e289e6d5e",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "dW3nGMUHYm4B8EJV",
+          "name": "Gmail account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Extract from File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from File": {
+      "main": [
+        [
+          {
+            "node": "Analyze document",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze document": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Send a message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send a message": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "8e25f10e-0e72-4367-be13-e4c6cf62e01b",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "6ecead9d9fb8e9ae6fd8401a5e8534dbd4abf8c3d5e3b12c1b360f5da920dc44"
+  },
+  "nodeGroups": [],
+  "id": "raFCdE8HzmvwCSZm",
+  "tags": []
+}
